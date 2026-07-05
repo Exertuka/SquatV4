@@ -5,7 +5,6 @@ import mediapipe as mp
 from ultralytics import YOLO
 
 # --- ARDUINO CONNECTION ---
-# Update this string to match your exact Arduino port!
 SERIAL_PORT = '/dev/cu.usbserial-120'
 
 try:
@@ -17,28 +16,6 @@ except Exception as e:
 
 
 # --- HELPER FUNCTIONS ---
-
-def count_left_fingers(landmarks):
-    """Rotation-proof finger counting using 3D distance from the wrist/palm"""
-    count = 0
-
-    def get_dist(p1, p2):
-        return math.hypot(landmarks.landmark[p1].x - landmarks.landmark[p2].x,
-                          landmarks.landmark[p1].y - landmarks.landmark[p2].y)
-
-    # 1. Thumb Logic: Check if Thumb Tip (4) is further from Pinky Base (17) than the Thumb Joint (3) is.
-    if get_dist(4, 17) > get_dist(3, 17):
-        count += 1
-
-    # 2. Other Fingers Logic: Check if Tip is further from the Wrist (0) than the PIP joint is.
-    tips = [8, 12, 16, 20]
-    pips = [6, 10, 14, 18]
-    for tip, pip in zip(tips, pips):
-        if get_dist(tip, 0) > get_dist(pip, 0):
-            count += 1
-
-    return count
-
 
 def draw_pinch_beam_and_get_dist(frame, landmarks, width, height, color=(0, 255, 255)):
     """Draws a beam between thumb and index and returns distance in pixels"""
@@ -68,7 +45,6 @@ holistic = mp_holistic.Holistic(
     min_tracking_confidence=0.5
 )
 
-# Remember to change to 0 if your built-in webcam acts up!
 cap = cv2.VideoCapture(1)
 
 print("Starting camera... Press 'q' to quit.")
@@ -80,9 +56,8 @@ while cap.isOpened():
 
     h, w, _ = frame.shape
 
-    # Default states to send to Arduino
+    # Default state to send to Arduino
     right_speed = 0
-    left_finger_count = 0
 
     # YOLO Detection (Objects & People)
     results = model(frame, stream=True, verbose=False)
@@ -95,11 +70,6 @@ while cap.isOpened():
     # MediaPipe Tracking (Body & Hands)
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     holistic_results = holistic.process(rgb_frame)
-
-    # LEFT HAND (Controls Synthesizer Buzzer)
-    if holistic_results.left_hand_landmarks:
-        mp_drawing.draw_landmarks(frame, holistic_results.left_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
-        left_finger_count = count_left_fingers(holistic_results.left_hand_landmarks)
 
     # RIGHT HAND (Controls Stepper Motor Speed)
     if holistic_results.right_hand_landmarks:
@@ -115,16 +85,14 @@ while cap.isOpened():
 
     # SEND DATA TO ARDUINO
     if arduino:
-        # Format: "Speed,FingerCount\n"
-        data_string = f"{right_speed},{left_finger_count}\n"
+        # Format: "Speed\n"
+        data_string = f"{right_speed}\n"
         arduino.write(data_string.encode())
 
     # HUD (Heads Up Display)
     cv2.putText(frame, f'Motor Speed: {right_speed}', (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    cv2.putText(frame, f'Left Fingers (Pitch): {left_finger_count}', (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                (255, 255, 255), 2)
 
-    cv2.imshow('AI Hardware Controller (Musical Edition)', frame)
+    cv2.imshow('AI Motor Controller', frame)
 
     # Press 'q' to quit
     if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -132,7 +100,7 @@ while cap.isOpened():
 
 # Clean up
 if arduino:
-    arduino.write(b"0,0\n")
+    arduino.write(b"0\n")
     arduino.close()
 cap.release()
 cv2.destroyAllWindows()
