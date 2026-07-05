@@ -1,54 +1,107 @@
 import cv2
+import math
+import serial
 import mediapipe as mp
+from ultralytics import YOLO
 
-# 1. Initialize MediaPipe Pose and Drawing modules
-mp_pose = mp.solutions.pose
-mp_draw = mp.solutions.drawing_utils
-pose = mp_pose.Pose(
-    static_image_mode=False,  # False means optimize for continuous video tracking
-    model_complexity=1,  # 1 is the sweet spot for real-time speed on a Mac
-    enable_segmentation=False,
+# --- ARDUINO CONNECTION ---
+SERIAL_PORT = '/dev/cu.usbserial-120'
+
+try:
+    arduino = serial.Serial(SERIAL_PORT, 115200, timeout=0.01)
+    print("Arduino connected successfully!")
+except Exception as e:
+    print(f"Arduino not found: {e}")
+    arduino = None
+
+
+# --- HELPER FUNCTIONS ---
+
+def draw_pinch_beam_and_get_dist(frame, landmarks, width, height, color=(0, 255, 255)):
+    """Draws a beam between thumb and index and returns distance in pixels"""
+    thumb = landmarks.landmark[4]
+    index = landmarks.landmark[8]
+
+    x1, y1 = int(thumb.x * width), int(thumb.y * height)
+    x2, y2 = int(index.x * width), int(index.y * height)
+
+    cv2.line(frame, (x1, y1), (x2, y2), color, 3)
+    cv2.circle(frame, (x1, y1), 5, color, cv2.FILLED)
+    cv2.circle(frame, (x2, y2), 5, color, cv2.FILLED)
+
+    return int(math.hypot(x2 - x1, y2 - y1))
+
+
+# --- INITIALIZATION ---
+model = YOLO('yolov8n.pt')
+mp_holistic = mp.solutions.holistic
+mp_drawing = mp.solutions.drawing_utils
+
+holistic = mp_holistic.Holistic(
+    static_image_mode=False,
+    model_complexity=1,
+    smooth_landmarks=True,
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5
 )
 
-# 2. Open live webcam (0 is your built-in Mac camera)
 cap = cv2.VideoCapture(1)
 
-print("Opening webcam... stand back so it can see your full body! Press 'q' to quit.")
+print("Starting camera... Press 'q' to quit.")
 
-while True:
+while cap.isOpened():
     success, frame = cap.read()
     if not success:
-        print("Error: Could not read from webcam.")
-        break
+        continue
 
-    # Flip the image horizontally for a natural "mirror" effect
-    frame = cv2.flip(frame, 1)
+    h, w, _ = frame.shape
 
-    # Convert the BGR frame to RGB for MediaPipe
-    imgRGB = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # Default state to send to Arduino
+    right_speed = 0
 
-    # Process the frame to find the body skeleton
-    results = pose.process(imgRGB)
+    # YOLO Detection (Objects & People)
+    results = model(frame, stream=True, verbose=False)
+    for r in results:
+        boxes = r.boxes
+        for box in boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 105, 180), 2)
 
-    # If a body is detected, draw the full wireframe skeleton automatically
-    if results.pose_landmarks:
-        mp_draw.draw_landmarks(
-            frame,
-            results.pose_landmarks,
-            mp_pose.POSE_CONNECTIONS,
-            mp_draw.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=4),  # Red joint dots
-            mp_draw.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2)  # Green connection lines
-        )
+    # MediaPipe Tracking (Body & Hands)
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    holistic_results = holistic.process(rgb_frame)
 
-    # Show the live feed window
-    cv2.imshow("Live Skeleton Tracker", frame)
+    # RIGHT HAND (Controls Stepper Motor Speed)
+    if holistic_results.right_hand_landmarks:
+        mp_drawing.draw_landmarks(frame, holistic_results.right_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
+        right_dist = draw_pinch_beam_and_get_dist(frame, holistic_results.right_hand_landmarks, w, h, (0, 255, 255))
 
-    # Wait 1 millisecond between frames, close window if 'q' is pressed
+        # Calibrated Logic: Distance 25 to 600 maps to Speed 0 to 2000
+        if right_dist < 25:
+            right_speed = 0
+        else:
+            mapped_speed = int((right_dist - 25) * 3.5)
+            right_speed = min(mapped_speed, 2000)  # Cap at 2000
+
+    # SEND DATA TO ARDUINO
+    if arduino:
+        # Format: "Speed\n"
+        data_string = f"{right_speed}\n"
+        arduino.write(data_string.encode())
+
+    # HUD (Heads Up Display)
+    cv2.putText(frame, f'Motor Speed: {right_speed}', (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+    cv2.imshow('AI Motor Controller', frame)
+
+    # Press 'q' to quit
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# Clean up resources when closing
+# Clean up
+if arduino:
+    arduino.write(b"0\n")
+    arduino.close()
 cap.release()
 cv2.destroyAllWindows()
+holistic.close()
