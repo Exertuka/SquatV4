@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+*_analysis.mov
+*_analysis.mp4
+squat_analysis.mp4
+squat_analysis1.mov
+.idea/
